@@ -1,13 +1,12 @@
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
-
 
 # ----------------- หน้า & การรีเฟรชอัตโนมัติ -----------------
 st.set_page_config(page_title="Solar Tracker Analytics", layout="wide")
@@ -22,29 +21,28 @@ def load_all_data(source: str) -> pd.DataFrame:
     โหลดข้อมูลทั้งหมดจาก SQLite หรือ CSV/URL
     คืนค่า DataFrame ที่มีคอลัมน์ ts_utc (datetime UTC)
     """
-    # ตัดช่องว่าง
     source = source.strip()
 
+    # ถ้าลงท้าย .db / .sqlite ให้ถือว่าเป็นฐานข้อมูล
     if source.lower().endswith((".db", ".sqlite", ".sqlite3")):
-        # โหลดจาก SQLite
         conn = sqlite3.connect(source)
         try:
-            # สมมติว่าตารางชื่อ telemetry และมีคอลัมน์ ts_utc เป็น TEXT/ISO8601
+            # สมมติว่าตารางชื่อ telemetry
             df = pd.read_sql_query("SELECT * FROM telemetry", conn)
         finally:
             conn.close()
     else:
-        # โหลดจาก CSV หรือ URL (รองรับทั้งไฟล์ใน repo และ Google Sheet URL)
+        # ถ้าไม่ใช่ .db ให้ลองอ่านเป็น CSV หรือ URL
         df = pd.read_csv(source)
 
-    # แปลงเวลาเป็น datetime UTC
     if "ts_utc" not in df.columns:
         raise ValueError("ไม่พบคอลัมน์ 'ts_utc' ในไฟล์/ฐานข้อมูล")
 
+    # แปลงเวลาเป็น datetime แบบ UTC
     df["ts_utc"] = pd.to_datetime(df["ts_utc"], utc=True, errors="coerce")
     df = df.dropna(subset=["ts_utc"]).copy()
 
-    # ถ้ามี site_id ก็แปลงเป็น str เผื่อมีตัวเลข
+    # แปลง site_id เป็น string เผื่อเป็นตัวเลข
     if "site_id" in df.columns:
         df["site_id"] = df["site_id"].astype(str)
 
@@ -61,11 +59,11 @@ def filter_and_resample(
     """
     ฟิลเตอร์ข้อมูลตาม site_id และช่วงเวลา แล้ว resample ตามนาทีที่กำหนด
     """
-    # ฟิลเตอร์ site
+    # ฟิลเตอร์ตาม site_id
     if "site_id" in df.columns and site_id:
         df = df[df["site_id"] == site_id]
 
-    # ฟิลเตอร์ช่วงเวลา (ts_utc อยู่ในรูป datetime UTC)
+    # ฟิลเตอร์ช่วงเวลา
     mask = (df["ts_utc"] >= start_dt) & (df["ts_utc"] <= end_dt)
     df = df.loc[mask].copy()
 
@@ -74,7 +72,6 @@ def filter_and_resample(
 
     df = df.sort_values("ts_utc").set_index("ts_utc")
 
-    # resample เป็นค่าเฉลี่ยต่อช่วงเวลา (เช่น 5 นาที)
     rule = f"{resample_min}min"
     agg_cols = {}
 
@@ -90,7 +87,7 @@ def filter_and_resample(
     return df_resampled
 
 
-# ----------------- ส่วน Sidebar: การตั้งค่า -----------------
+# ----------------- Sidebar: การตั้งค่า -----------------
 st.sidebar.header("⚙️ Settings")
 
 DB_OR_CSV = st.sidebar.text_input(
@@ -98,34 +95,30 @@ DB_OR_CSV = st.sidebar.text_input(
     "sample_data.csv",
 )
 
-site = st.sidebar.text_input("Site ID", "KMUTT-PROTOTYPE")
+site_input = st.sidebar.text_input("Site ID", "KMUTT-PROTOTYPE")
 
-# โหลดข้อมูลดิบก่อน เพื่อดูช่วงวันที่ทั้งหมด
-df_raw = pd.DataFrame()
-error = None
+# โหลดข้อมูลดิบ
 try:
     df_raw = load_all_data(DB_OR_CSV)
 except Exception as e:
-    error = str(e)
-
-if error:
-    st.error(f"โหลดข้อมูลไม่สำเร็จ: {error}")
+    st.error(f"โหลดข้อมูลไม่สำเร็จ: {e}")
     st.stop()
 
 if df_raw.empty:
     st.warning("ไม่พบข้อมูลในไฟล์/ฐานข้อมูลที่ระบุ")
     st.stop()
 
-# ถ้ามีหลาย site ให้ผู้ใช้เลือกได้จากรายการ
+# ถ้ามีหลาย site ให้เลือกจากรายการ
 if "site_id" in df_raw.columns:
     unique_sites = sorted(df_raw["site_id"].astype(str).unique())
-    if site not in unique_sites:
-        # ถ้า site ที่พิมพ์ไม่อยู่ในรายการ ให้เลือกตัวแรก
-        site = st.sidebar.selectbox("Site ID (จากข้อมูลที่มี)", unique_sites, index=0)
+    if site_input in unique_sites:
+        default_idx = unique_sites.index(site_input)
     else:
-        site = st.sidebar.selectbox("Site ID (จากข้อมูลที่มี)", unique_sites, index=unique_sites.index(site))
+        default_idx = 0
+    site = st.sidebar.selectbox("Site ID (จากข้อมูลที่มี)", unique_sites, index=default_idx)
+else:
+    site = site_input
 
-# หาช่วงวันที่จากข้อมูล
 min_date = df_raw["ts_utc"].min().date()
 max_date = df_raw["ts_utc"].max().date()
 
@@ -136,33 +129,33 @@ if start_date > end_date:
     st.sidebar.error("Start date ต้องไม่มากกว่า End date")
     st.stop()
 
-resample_min = st.sidebar.selectbox("Resample (minutes)", [1, 5, 10, 15, 30, 60], index=1)
+resample_min = st.sidebar.selectbox("Resample (minutes)", [1, 5, 10, 15, 30, 60], index=0)
 
 panel_area = st.sidebar.number_input(
-    "Panel area (m²) for PR baseline",
-    min_value=0.1,
-    value=1.0,
-    step=0.1,
+    "Panel area (m²) baseline",
+    min_value=0.05,
+    value=1.00,
+    step=0.05,
 )
 
 module_eff = st.sidebar.number_input(
-    "Module eff. (nameplate)",
+    "Module eff. (0–1)",
     min_value=0.01,
-    max_value=1.0,
+    max_value=1.00,
     value=0.20,
     step=0.01,
 )
 
 fixed_pr_baseline = st.sidebar.number_input(
-    "Fixed-tilt PR baseline (โซลาร์ปกติ)",
-    min_value=0.1,
-    max_value=1.0,
+    "Fixed-tilt PR baseline (โซลาร์ 5V ธรรมดา)",
+    min_value=0.10,
+    max_value=1.00,
     value=0.80,
     step=0.05,
 )
 
 
-# ----------------- เตรียมช่วงเวลา และฟิลเตอร์ข้อมูล -----------------
+# ----------------- ฟิลเตอร์ข้อมูลตามช่วงเวลา -----------------
 start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
 end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=timezone.utc)
 
@@ -171,7 +164,7 @@ df = filter_and_resample(df_raw, site, start_dt, end_dt, resample_min)
 st.title("☀️ Solar Tracker Analytics — Free-Motion PV Tracker")
 
 if df.empty:
-    st.warning("ไม่พบข้อมูลในไฟล์ที่ระบุ/ช่วงเวลานี้ – ลองเปลี่ยนช่วงวันที่ หรือไฟล์ข้อมูล")
+    st.warning("ไม่พบข้อมูลในไฟล์/ช่วงเวลาที่เลือก")
     st.stop()
 
 
@@ -182,49 +175,63 @@ dc_power = df.get("dc_power", pd.Series(dtype=float)).fillna(0.0)
 panel_temp_c = df.get("panel_temp_c", pd.Series(dtype=float))
 irradiance = df.get("irradiance_wm2", pd.Series(dtype=float)).fillna(0.0)
 
-# พลังงานจริงที่ผลิตได้ (Wh)
+# พลังงานจริงของ Tracker (Wh)
 daily_energy_wh = float((dc_power * dt_hours).sum())
 
-# กำลังสูงสุด (W)
+# กำลังสูงสุด
 peak_power = float(dc_power.max()) if not dc_power.empty else 0.0
 
-# อุณหภูมิแผงเฉลี่ย (°C)
+# อุณหภูมิแผงเฉลี่ย
 avg_panel_temp = float(panel_temp_c.mean()) if not panel_temp_c.empty else np.nan
 
-# พลังงานอ้างอิงจาก irradiance (Wh) สำหรับคำนวณ PR
+# พลังงานอ้างอิงตาม irradiance (สำหรับใช้ทั้ง Tracker และ Fixed)
 ref_energy_wh = float((irradiance * panel_area * module_eff * dt_hours).sum())
 
 if ref_energy_wh > 0:
-    pr = daily_energy_wh / ref_energy_wh
+    pr_tracker = daily_energy_wh / ref_energy_wh
 else:
-    pr = np.nan
+    pr_tracker = np.nan
 
-# เปรียบเทียบกับโซลาร์คงที่
-tracker_gain_pct = None
-if np.isfinite(pr) and fixed_pr_baseline > 0:
-    tracker_gain_pct = (pr - fixed_pr_baseline) / fixed_pr_baseline * 100.0
+# สมมติแผง Fixed 5V มี PR = fixed_pr_baseline
+if ref_energy_wh > 0:
+    fixed_energy_wh = ref_energy_wh * fixed_pr_baseline
+else:
+    fixed_energy_wh = np.nan
+
+# Tracker Gain เทียบกับ Fixed 5V
+if fixed_energy_wh and fixed_energy_wh > 0:
+    tracker_gain_pct = (daily_energy_wh - fixed_energy_wh) / fixed_energy_wh * 100.0
+else:
+    tracker_gain_pct = np.nan
 
 
-# ----------------- แสดงผลเป็น metrics -----------------
+# ----------------- แสดงผล Metrics -----------------
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Daily Energy (Wh)", f"{daily_energy_wh:.1f}")
-col2.metric("Peak Power (W)", f"{peak_power:.1f}")
+col1.metric("Tracker Energy (Wh)", f"{daily_energy_wh:.2f}")
+if np.isfinite(fixed_energy_wh):
+    col2.metric("Fixed 5V Energy (Wh, est.)", f"{fixed_energy_wh:.2f}")
+else:
+    col2.metric("Fixed 5V Energy (Wh, est.)", "N/A")
+
+if np.isfinite(tracker_gain_pct):
+    col3.metric("Tracker Gain vs Fixed (%)", f"{tracker_gain_pct:.1f}%")
+else:
+    col3.metric("Tracker Gain vs Fixed (%)", "N/A")
+
+col4.metric("Peak Power (W)", f"{peak_power:.2f}")
+
+col5, col6, col7, col8 = st.columns(4)
+if np.isfinite(pr_tracker):
+    col5.metric("Performance Ratio (Tracker)", f"{pr_tracker:.2f}")
+else:
+    col5.metric("Performance Ratio (Tracker)", "N/A")
+
+col6.metric("Fixed-tilt PR baseline", f"{fixed_pr_baseline:.2f}")
+col7.metric("Reference Energy (Wh)", f"{ref_energy_wh:.2f}")
 if np.isfinite(avg_panel_temp):
-    col3.metric("Avg Panel Temp (°C)", f"{avg_panel_temp:.1f}")
+    col8.metric("Avg Panel Temp (°C)", f"{avg_panel_temp:.1f}")
 else:
-    col3.metric("Avg Panel Temp (°C)", "N/A")
-if np.isfinite(pr):
-    col4.metric("Performance Ratio (Tracker)", f"{pr:.2f}")
-else:
-    col4.metric("Performance Ratio (Tracker)", "N/A")
-
-if tracker_gain_pct is not None:
-    col5, col6, col7, col8 = st.columns(4)
-    col5.metric("Tracker Gain vs Fixed (%)", f"{tracker_gain_pct:.1f}%")
-    col6.metric("Fixed-tilt PR baseline", f"{fixed_pr_baseline:.2f}")
-    col7.metric("Reference Energy (Wh)", f"{ref_energy_wh:.1f}")
-    col8.metric("Resample", f"{resample_min} min")
-
+    col8.metric("Avg Panel Temp (°C)", "N/A")
 
 st.markdown("---")
 
@@ -232,6 +239,7 @@ st.markdown("---")
 st.subheader("DC Power vs Time")
 
 df_plot = df.reset_index().rename(columns={"ts_utc": "timestamp"})
+
 fig_power = px.line(
     df_plot,
     x="timestamp",
@@ -241,7 +249,7 @@ fig_power = px.line(
 fig_power.update_layout(xaxis_rangeslider_visible=False)
 st.plotly_chart(fig_power, use_container_width=True)
 
-# ----------------- กราฟเพิ่มเติม (Optional) -----------------
+# ----------------- กราฟ Irradiance & Temp -----------------
 cols_plot = st.columns(2)
 
 with cols_plot[0]:
@@ -270,7 +278,7 @@ with cols_plot[1]:
 
 st.markdown("___")
 st.caption(
-    "ระบบนี้รองรับทั้งไฟล์ตัวอย่าง sample_data.csv และข้อมูลจริงจาก ESP32 "
-    "ผ่าน Google Sheet / SQLite; ปรับค่า PR baseline ในแถบซ้ายเพื่อเทียบกับโซลาร์แบบปกติได้"
+    "Tracker Energy คือพลังงานจริงจากระบบหันตามดวงอาทิตย์\n"
+    "Fixed 5V Energy คือพลังงานที่คาดว่าได้จากโซลาร์ 5V ธรรมดา (ติดตายตัว) โดยอ้างอิง PR baseline ที่ตั้งใน Sidebar\n"
+    "Tracker Gain vs Fixed คือเปอร์เซ็นต์ที่ระบบ Free-Motion Tracker ดีกว่า/แย่กว่าแผงคงที่"
 )
-
