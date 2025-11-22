@@ -1,139 +1,138 @@
-import sqlite3
 import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.express as px
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title='Solar Tracker Analytics', layout='wide')
-st.title('☀️ Solar Tracker Analytics — Free-Motion PV Tracker')
+# -------------------------------------------------------
+# PAGE CONFIG
+# -------------------------------------------------------
+st.set_page_config(
+    page_title='Solar Tracker Analytics',
+    layout='wide'
+)
 
-# -----------------------------
-# Sidebar Input
-# -----------------------------
+st.title("🌞 Solar Tracker Analytics — Free-Motion PV Tracker")
+
+# -------------------------------------------------------
+# SIDEBAR — INPUTS
+# -------------------------------------------------------
 st.sidebar.header("Settings")
 
-DB_OR_CSV = st.sidebar.text_input('SQLite DB path (or CSV / URL)', 'sample_data.csv')
-site = st.sidebar.text_input('Site ID', 'KMUTT-PROTOTYPE')
-site_from_data = st.sidebar.text_input('Site ID (จากข้อมูลที่มี)', 'KMUTT-PROTOTYPE')
+csv_path = st.sidebar.text_input("CSV file (or URL)", "sample_data.csv")
 
-# วันที่
+site_id = st.sidebar.text_input("Site ID", "KMUTT-PROTOTYPE")
+
 today = datetime.utcnow().date()
-start_date = st.sidebar.date_input('Start date (UTC)', today)
-end_date = st.sidebar.date_input('End date (UTC)', today)
+start_date = st.sidebar.date_input("Start date (UTC)", today)
+end_date = st.sidebar.date_input("End date (UTC)", today)
 
-# resample (minutes)
-resample_min = st.sidebar.selectbox('Resample (minutes)', [1, 5, 10, 15, 30, 60], index=1)
+resample_min = st.sidebar.selectbox("Resample (minutes)", [1, 5, 10, 15, 30, 60], index=1)
 
-# PR baseline settings
-panel_area = st.sidebar.number_input("Panel area (m²) for PR baseline", value=1.00, step=0.1)
-module_eff = st.sidebar.number_input("Module eff. (nameplate)", value=0.20, step=0.01)
+panel_area = st.sidebar.number_input("Panel area (m²) baseline", 0.1, 10.0, 1.00, 0.1)
+eff = st.sidebar.number_input("Module eff. (0–1)", 0.01, 1.0, 0.20, 0.01)
 
-# -----------------------------
-# Load Data
-# -----------------------------
-def load_data(path, site, start, end):
-    if path.endswith(".csv"):
+
+# -------------------------------------------------------
+# LOAD DATA
+# -------------------------------------------------------
+def load_csv(path):
+    try:
         df = pd.read_csv(path)
-    else:
-        conn = sqlite3.connect(path)
-        df = pd.read_sql_query("SELECT * FROM telemetry", conn)
-        conn.close()
 
-    # Convert time
-    df["ts_utc"] = pd.to_datetime(df["ts_utc"])
-    df = df[(df["site_id"] == site)]
-    df = df[(df["ts_utc"] >= pd.Timestamp(start)) & (df["ts_utc"] <= pd.Timestamp(end) + pd.Timedelta(days=1))]
+        # ⭐ สำคัญสุด – แปลง timestamp ให้เป็น datetime
+        df['ts_utc'] = pd.to_datetime(df['ts_utc'], errors='coerce')
 
-    if df.empty:
-        return pd.DataFrame()
+        # ลบทุกรายการที่ไม่สามารถแปลงได้
+        df = df.dropna(subset=['ts_utc'])
 
-    df = df.set_index("ts_utc").sort_index()
+        return df
 
-    # Apply resample (mean)
-    df = df.resample(f"{resample_min}T").mean().dropna()
+    except Exception as e:
+        st.error(f"โหลดไฟล์ไม่สำเร็จ: {e}")
+        return None
 
+
+# -------------------------------------------------------
+# FILTER DATA BY DATE
+# -------------------------------------------------------
+def filter_data(df, start, end):
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end) + pd.Timedelta(days=1)
+
+    df = df[(df['ts_utc'] >= start_ts) & (df['ts_utc'] < end_ts)]
     return df
 
 
-df = load_data(DB_OR_CSV, site_from_data, start_date, end_date)
+# -------------------------------------------------------
+# RESAMPLE DATA
+# -------------------------------------------------------
+def resample_df(df, minutes):
+    df = df.set_index('ts_utc')
+    df = df.resample(f"{minutes}T").mean().interpolate()
+    df = df.reset_index()
+    return df
 
-# -----------------------------
-# If no data
-# -----------------------------
-if df.empty:
-    st.info('ไม่พบข้อมูลในไฟล์นี้ระบุ/ช่วงเวลานี้ — ใส่ชื่อไฟล์เป็น "sample_data.csv" หรืออัปโหลดไฟล์ให้ถูกตำแหน่ง แล้วกด Rerun')
+
+# -------------------------------------------------------
+# PROCESSING
+# -------------------------------------------------------
+df = load_csv(csv_path)
+
+if df is None or df.empty:
+    st.warning("ไม่พบข้อมูลในไฟล์หรือโหลดไม่ได้ – ตรวจสอบชื่อไฟล์ CSV แล้วกด Rerun")
     st.stop()
 
-# -----------------------------
-# Summary Cards
-# -----------------------------
-st.subheader("Summary")
+df = df[df["site_id"] == site_id]
+
+df = filter_data(df, start_date, end_date)
+
+if df.empty:
+    st.warning("ไม่พบข้อมูลในช่วงวันที่นี้")
+    st.stop()
+
+df = resample_df(df, resample_min)
+
+# -------------------------------------------------------
+# SUMMARY METRICS
+# -------------------------------------------------------
+daily_wh = np.trapz(df['dc_power'], dx=resample_min * 60) / 3600
+peak_power = df['dc_power'].max()
+avg_temp = df['panel_temp_c'].mean()
+pr_value = (daily_wh / (panel_area * eff * 1000)) if eff > 0 else 0
+
+
+# -------------------------------------------------------
+# SHOW SUMMARY
+# -------------------------------------------------------
 col1, col2, col3, col4 = st.columns(4)
-
-daily_energy = (df["dc_power"].sum() * (resample_min / 60))  # Wh
-peak_power = df["dc_power"].max()
-avg_panel_temp = df["temp_panel"].mean() if "temp_panel" in df.columns else 0
-performance_ratio = daily_energy / (panel_area * 1000 * module_eff + 1e-9)
-
-col1.metric("Daily Energy (Wh)", f"{daily_energy:.1f}")
+col1.metric("Daily Energy (Wh)", f"{daily_wh:.1f}")
 col2.metric("Peak Power (W)", f"{peak_power:.1f}")
-col3.metric("Avg Panel Temp (°C)", f"{avg_panel_temp:.1f}")
-col4.metric("Performance Ratio", f"{performance_ratio:.2f}")
+col3.metric("Avg Panel Temp (°C)", f"{avg_temp:.1f}")
+col4.metric("Performance Ratio", f"{pr_value:.2f}")
 
-# -----------------------------
-# DC POWER GRAPH (WITH MARKERS)
-# -----------------------------
-st.subheader("DC Power vs Time")
 
-df_plot = df.reset_index().rename(columns={"ts_utc": "timestamp"})
+# -------------------------------------------------------
+# PLOTS
+# -------------------------------------------------------
 
-fig_power = px.line(
-    df_plot,
-    x="timestamp",
-    y="dc_power",
-    labels={"timestamp": "Time (UTC)", "dc_power": "DC Power (W)"},
-    markers=True,       # ★ จุด marker เพื่อดูค่าง่าย
-)
+# 1) DC POWER
+fig1 = px.line(df, x="ts_utc", y="dc_power", title="DC Power vs Time")
+st.plotly_chart(fig1, use_container_width=True)
 
-fig_power.update_layout(xaxis_rangeslider_visible=False)
-st.plotly_chart(fig_power, use_container_width=True)
+# 2) IRRADIANCE
+fig2 = px.line(df, x="ts_utc", y="irradiance_wm2", title="Irradiance (W/m²)")
+st.plotly_chart(fig2, use_container_width=True)
 
-# Show raw data preview
-st.write("🔍 **ค่าที่ใช้ในการพล็อตกราฟ DC Power**")
-st.dataframe(df_plot[["timestamp", "dc_power"]])
+# 3) PANEL TEMP
+fig3 = px.line(df, x="ts_utc", y="panel_temp_c", title="Panel Temperature (°C)")
+st.plotly_chart(fig3, use_container_width=True)
 
-# -----------------------------
-# IRRADIANCE GRAPH
-# -----------------------------
-if "irradiance" in df.columns:
-    st.subheader("Irradiance (W/m²)")
-    fig_irr = px.line(
-        df_plot,
-        x="timestamp",
-        y="irradiance",
-        labels={"timestamp": "Time (UTC)", "irradiance": "Irradiance"},
-        markers=True,
-    )
-    st.plotly_chart(fig_irr, use_container_width=True)
+# 4) WIND SPEED
+fig4 = px.line(df, x="ts_utc", y="wind_ms", title="Wind Speed (m/s)")
+st.plotly_chart(fig4, use_container_width=True)
 
-# -----------------------------
-# PANEL TEMPERATURE GRAPH
-# -----------------------------
-if "temp_panel" in df.columns:
-    st.subheader("Panel Temperature (°C)")
-    fig_temp = px.line(
-        df_plot,
-        x="timestamp",
-        y="temp_panel",
-        labels={"timestamp": "Time (UTC)", "temp_panel": "Panel Temp (°C)"},
-        markers=True,
-    )
-    st.plotly_chart(fig_temp, use_container_width=True)
-
-# -----------------------------
-# RAW DATA
-# -----------------------------
-st.subheader("Raw data")
-st.dataframe(df)
+# 5) TRACKER ANGLE (Az & Elevation)
+fig5 = px.line(df, x="ts_utc", y=["tracker_az_deg", "tracker_el_deg"],
+               title="Tracker Angle (Azimuth / Elevation)")
+st.plotly_chart(fig5, use_container_width=True)
